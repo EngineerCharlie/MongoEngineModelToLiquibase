@@ -26,6 +26,7 @@ VERSION = "1.0.0"
 DDL_DIR = os.path.join(BASE_DIR, VERSION, "ddl")
 VERSION_CHANGELOG = os.path.join(BASE_DIR, VERSION, f"changelog-{VERSION}.xml")
 MASTER_CHANGELOG = os.path.join(BASE_DIR, "changelog-master.xml")
+AUTHOR = "EngineerCharlie"
 
 # Runtime Type Mapping Engine
 TYPE_MAPPING = {
@@ -188,7 +189,7 @@ def generate_ddl_files(app_data):
 
         # ChangeSet 1: Create Collection with nested Schema Definitions
         xml_content += (
-            f'    <changeSet id="create-{c_name}-collection" author="dev-team">\n'
+            f'    <changeSet id="create-{c_name}-collection" author="{AUTHOR}">\n'
         )
         xml_content += "        <preConditions>\n"
         xml_content += "            <not>\n"
@@ -210,7 +211,7 @@ def generate_ddl_files(app_data):
 
         # ChangeSet 2: Unique Fields
         for field in col["unique_fields"]:
-            xml_content += f'    <changeSet id="create-{c_name}-index-{field}-unique" author="dev-team">\n'
+            xml_content += f'    <changeSet id="create-{c_name}-index-{field}-unique" author="{AUTHOR}">\n'
             xml_content += f'        <ext:createIndex collectionName="{c_name}">\n'
             xml_content += f'            <ext:keys>{{ "{field}": 1 }}</ext:keys>\n'
             xml_content += f'            <ext:options>{{ "name": "idx_{c_name}_{field}_unique", "unique": true }}</ext:options>\n'
@@ -220,7 +221,7 @@ def generate_ddl_files(app_data):
         # ChangeSet 3: Meta Class dictionary indexes
         for idx_def in col["indexes"]:
             if isinstance(idx_def, str):
-                xml_content += f'    <changeSet id="create-{c_name}-index-{idx_def}" author="dev-team">\n'
+                xml_content += f'    <changeSet id="create-{c_name}-index-{idx_def}" author="{AUTHOR}">\n'
                 xml_content += f'        <ext:createIndex collectionName="{c_name}">\n'
                 xml_content += (
                     f'            <ext:keys>{{ "{idx_def}": 1 }}</ext:keys>\n'
@@ -234,7 +235,7 @@ def generate_ddl_files(app_data):
                 keys_expr = ", ".join([f'"{f}": 1' for f in fields_list])
                 is_unique = ', "unique": true' if idx_def.get("unique") else ""
 
-                xml_content += f'    <changeSet id="create-{c_name}-index-compound" author="dev-team">\n'
+                xml_content += f'    <changeSet id="create-{c_name}-index-compound" author="{AUTHOR}">\n'
                 xml_content += f'        <ext:createIndex collectionName="{c_name}">\n'
                 xml_content += f"            <ext:keys>{{ {keys_expr} }}</ext:keys>\n"
                 xml_content += f'            <ext:options>{{ "name": "{idx_name}"{is_unique} }}</ext:options>\n'
