@@ -205,6 +205,13 @@ def generate_ddl_files(app_data):
         xml_content += f"{indented_json}\n"
         xml_content += "                    ]]></document>\n"
         xml_content += "                </option>\n"
+        xml_content += (
+            '                <option name="validationLevel" value="moderate"/>\n'
+        )
+
+        xml_content += (
+            '                <option name="validationAction" value="warn"/>\n'
+        )
         xml_content += "            </options>\n"
         xml_content += "        </ext:createCollection>\n"
         xml_content += "    </changeSet>\n\n"
