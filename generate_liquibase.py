@@ -8,7 +8,10 @@ if not settings.configured:
         USE_TZ=True,
         INSTALLED_APPS=[
             "apps.email_sender",
+            "apps.metric_analysis",
+            "apps.odoo_integration",
             "apps.report_generation",
+            "apps.user",
         ],
     )
 
@@ -18,15 +21,18 @@ from mongoengine.base.fields import BaseField
 # Explicitly list target modules to inspect
 MODEL_FILES = [
     "apps.email_sender.models",
+    "apps.metric_analysis.models",
+    "apps.odoo_integration.models",
     "apps.report_generation.models",
+    "apps.user.models",
 ]
 
 BASE_DIR = os.path.join("db", "changelog", "mongodb")
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 DDL_DIR = os.path.join(BASE_DIR, VERSION, "ddl")
 VERSION_CHANGELOG = os.path.join(BASE_DIR, VERSION, f"changelog-{VERSION}.xml")
 MASTER_CHANGELOG = os.path.join(BASE_DIR, "changelog-master.xml")
-AUTHOR = "EngineerCharlie"
+AUTHOR = "ENGINEER CHARLIE"
 
 # Runtime Type Mapping Engine
 TYPE_MAPPING = {
@@ -58,14 +64,12 @@ def serialize_document_schema(model_cls) -> dict:
     required = []
 
     for field_name, field_obj in model_cls._fields.items():
-        # Skip internal mongo id field references if not customized
         if field_name == "id" and field_obj.__class__.__name__ == "ObjectIdField":
             continue
 
         bson_type = get_bson_type(field_obj)
         field_schema = {"bsonType": bson_type}
 
-        # Handle structural recursion for Embedded documents nested inside objects
         if field_class := getattr(field_obj, "document_type", None):
             if issubclass(field_class, mongoengine.EmbeddedDocument):
                 embedded_props = {}
@@ -110,15 +114,12 @@ def extract_runtime_models(modules_list):
 
     for module_path in modules_list:
         try:
-            # Dynamically import via full module lookup string paths
             mod = __import__(module_path, fromlist=["*"])
-            # Split out app label token identifier (e.g. 'user' or 'email_sender')
             app_label = module_path.split(".")[1]
 
             if app_label not in app_groups:
                 app_groups[app_label] = []
 
-            # Check module attributes for evaluated MongoEngine Document models
             for attr_name in dir(mod):
                 obj = getattr(mod, attr_name)
                 if isinstance(obj, type) and issubclass(
@@ -127,14 +128,17 @@ def extract_runtime_models(modules_list):
                     if obj in (mongoengine.Document, mongoengine.DynamicDocument):
                         continue
 
+                    # FIX: Only process the model if it belongs to this exact module file.
+                    # This stops base classes imported for inheritance/cross-app references from being processed twice.
+                    if getattr(obj, "__module__", "") != module_path:
+                        continue
+
                     meta = getattr(obj, "_meta", {})
-                    # Skip sub-inheritance types that do not own independent collections
                     if meta.get("abstract", False):
                         continue
 
                     collection_name = meta.get("collection", obj.__name__.lower())
 
-                    # Capture runtime index criteria evaluations
                     unique_fields = [
                         f_name
                         for f_name, f_obj in obj._fields.items()
@@ -158,107 +162,175 @@ def extract_runtime_models(modules_list):
 
 def generate_ddl_files(app_data):
     os.makedirs(DDL_DIR, exist_ok=True)
-    generated_files = []
+    generated_files = set()
 
-    # Flatten out all collections from all apps to generate one file per collection
     all_collections = []
     for app_label, collections in app_data.items():
         all_collections.extend(collections)
 
     for col in all_collections:
         c_name = col["collection_name"]
-
-        # Name the file explicitly after the collection instead of the app label
         file_name = f"create-{c_name.replace('_', '-')}-collection.xml"
+        full_path = os.path.join(DDL_DIR, file_name)
 
-        # Open clean wrapper string profile
-        xml_content = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        xml_content += "<databaseChangeLog\n"
-        xml_content += '        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"\n'
-        xml_content += '        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"\n'
-        xml_content += (
-            '        xmlns:ext="http://www.liquibase.org/xml/ns/dbchangelog-ext"\n'
-        )
-        xml_content += '        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd\n'
-        xml_content += '        http://www.liquibase.org/xml/ns/dbchangelog-ext https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-ext.xsd">\n\n'
+        new_changesets = []
 
-        json_schema_str = json.dumps(col["schema"], indent=4)
-        indented_json = "\n".join(
-            [f"                    {line}" for line in json_schema_str.splitlines()]
+        options_dict = {
+            "validator": col["schema"],
+            "validationLevel": "moderate",
+            "validationAction": "warn",
+        }
+        json_options_str = json.dumps(options_dict, indent=4)
+        indented_options = "\n".join(
+            [f"            {line}" for line in json_options_str.splitlines()]
         )
 
-        # ChangeSet 1: Create Collection with nested Schema Definitions
-        xml_content += (
-            f'    <changeSet id="create-{c_name}-collection" author="{AUTHOR}">\n'
+        # ChangeSet 1: Create Collection with nested Schema Definitions & Rollback Strategies
+        cs1_id = f"{VERSION}-create-{c_name}-collection"
+        cs1_content = (
+            f'    <changeSet id="{cs1_id}" author="{AUTHOR}">\n'
+            # f'        <preConditions onFail="MARK_RAN">\n'
+            # f"            <not>\n"
+            # f'                <ext:collectionExists collectionName="{c_name}"/>\n'
+            # f"            </not>\n"
+            # f"        </preConditions>\n"
+            f'        <ext:createCollection collectionName="{c_name}">\n'
+            f"            <ext:options><![CDATA[\n"
+            f"{indented_options}\n"
+            f"            ]]></ext:options>\n"
+            f"        </ext:createCollection>\n"
+            f"        <rollback>\n"
+            f"            <ext:runCommand>\n"
+            f"                <ext:command>\n"
+            f'                    {{ "drop": "{c_name}" }}\n'
+            f"                </ext:command>\n"
+            f"            </ext:runCommand>\n"
+            f"        </rollback>\n"
+            f"    </changeSet>\n\n"
         )
-        xml_content += "        <preConditions>\n"
-        xml_content += "            <not>\n"
-        xml_content += (
-            f'                <ext:collectionExists collectionName="{c_name}"/>\n'
-        )
-        xml_content += "            </not>\n"
-        xml_content += "        </preConditions>\n"
-        xml_content += f'        <ext:createCollection collectionName="{c_name}">\n'
-        xml_content += "            <options>\n"
-        xml_content += '                <option name="validator">\n'
-        xml_content += "                    <document><![CDATA[\n"
-        xml_content += f"{indented_json}\n"
-        xml_content += "                    ]]></document>\n"
-        xml_content += "                </option>\n"
-        xml_content += (
-            '                <option name="validationLevel" value="moderate"/>\n'
-        )
-
-        xml_content += (
-            '                <option name="validationAction" value="warn"/>\n'
-        )
-        xml_content += "            </options>\n"
-        xml_content += "        </ext:createCollection>\n"
-        xml_content += "    </changeSet>\n\n"
+        new_changesets.append((cs1_id, cs1_content))
 
         # ChangeSet 2: Unique Fields
         for field in col["unique_fields"]:
-            xml_content += f'    <changeSet id="create-{c_name}-index-{field}-unique" author="{AUTHOR}">\n'
-            xml_content += f'        <ext:createIndex collectionName="{c_name}">\n'
-            xml_content += f'            <ext:keys>{{ "{field}": 1 }}</ext:keys>\n'
-            xml_content += f'            <ext:options>{{ "name": "idx_{c_name}_{field}_unique", "unique": true }}</ext:options>\n'
-            xml_content += "        </ext:createIndex>\n"
-            xml_content += "    </changeSet>\n\n"
+            idx_name = f"idx_{c_name}_{field}_unique"
+            cs2_id = f"{VERSION}-create-{c_name}-index-{field}-unique"
+            cs2_content = (
+                f'    <changeSet id="{cs2_id}" author="{AUTHOR}">\n'
+                f'        <ext:createIndex collectionName="{c_name}">\n'
+                f'            <ext:keys>{{ "{field}": 1 }}</ext:keys>\n'
+                f'            <ext:options>{{ "name": "{idx_name}", "unique": true }}</ext:options>\n'
+                f"        </ext:createIndex>\n"
+                f"        <rollback>\n"
+                f"            <ext:runCommand>\n"
+                f"                <ext:command>\n"
+                f'                    {{ "dropIndexes": "{c_name}", "index": "{idx_name}" }}\n'
+                f"                </ext:command>\n"
+                f"            </ext:runCommand>\n"
+                f"        </rollback>\n"
+                f"    </changeSet>\n\n"
+            )
+            new_changesets.append((cs2_id, cs2_content))
 
         # ChangeSet 3: Meta Class dictionary indexes
         for idx_def in col["indexes"]:
             if isinstance(idx_def, str):
-                xml_content += f'    <changeSet id="create-{c_name}-index-{idx_def}" author="{AUTHOR}">\n'
-                xml_content += f'        <ext:createIndex collectionName="{c_name}">\n'
-                xml_content += (
+                idx_name = f"idx_{c_name}_{idx_def}"
+                cs3_id = f"{VERSION}-create-{c_name}-index-{idx_def}"
+                cs3_content = (
+                    f'    <changeSet id="{cs3_id}" author="{AUTHOR}">\n'
+                    f'        <ext:createIndex collectionName="{c_name}">\n'
                     f'            <ext:keys>{{ "{idx_def}": 1 }}</ext:keys>\n'
+                    f'            <ext:options>{{ "name": "{idx_name}" }}</ext:options>\n'
+                    f"        </ext:createIndex>\n"
+                    f"        <rollback>\n"
+                    f"            <ext:runCommand>\n"
+                    f"                <ext:command>\n"
+                    f'                    {{ "dropIndexes": "{c_name}", "index": "{idx_name}" }}\n'
+                    f"                </ext:command>\n"
+                    f"            </ext:runCommand>\n"
+                    f"        </rollback>\n"
+                    f"    </changeSet>\n\n"
                 )
-                xml_content += f'            <ext:options>{{ "name": "idx_{c_name}_{idx_def}" }}</ext:options>\n'
-                xml_content += "        </ext:createIndex>\n"
-                xml_content += "    </changeSet>\n\n"
+                new_changesets.append((cs3_id, cs3_content))
             elif isinstance(idx_def, dict) and "fields" in idx_def:
                 fields_list = idx_def["fields"]
                 idx_name = f"idx_{c_name}_" + "_".join(fields_list)
                 keys_expr = ", ".join([f'"{f}": 1' for f in fields_list])
                 is_unique = ', "unique": true' if idx_def.get("unique") else ""
 
-                xml_content += f'    <changeSet id="create-{c_name}-index-compound" author="{AUTHOR}">\n'
-                xml_content += f'        <ext:createIndex collectionName="{c_name}">\n'
-                xml_content += f"            <ext:keys>{{ {keys_expr} }}</ext:keys>\n"
-                xml_content += f'            <ext:options>{{ "name": "{idx_name}"{is_unique} }}</ext:options>\n'
-                xml_content += "        </ext:createIndex>\n"
-                xml_content += "    </changeSet>\n\n"
+                cs3_id = (
+                    f"{VERSION}-create-{c_name}-index-compound-{-'-'.join(fields_list)}"
+                )
+                cs3_content = (
+                    f'    <changeSet id="{cs3_id}" author="{AUTHOR}">\n'
+                    f'        <ext:createIndex collectionName="{c_name}">\n'
+                    f"            <ext:keys>{{ {keys_expr} }}</ext:keys>\n"
+                    f'            <ext:options>{{ "name": "{idx_name}"{is_unique} }}</ext:options>\n'
+                    f"        </ext:createIndex>\n"
+                    f"        <rollback>\n"
+                    f"            <ext:runCommand>\n"
+                    f"                <ext:command>\n"
+                    f'                    {{ "dropIndexes": "{c_name}", "index": "{idx_name}" }}\n'
+                    f"                </ext:command>\n"
+                    f"            </ext:runCommand>\n"
+                    f"        </rollback>\n"
+                    f"    </changeSet>\n\n"
+                )
+                new_changesets.append((cs3_id, cs3_content))
 
-        xml_content += "</databaseChangeLog>\n"
+        # --- File Generation / Appending Logic ---
+        if os.path.exists(full_path):
+            with open(full_path, "r", encoding="utf-8") as f:
+                existing_content = f.read()
 
-        full_path = os.path.join(DDL_DIR, file_name)
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.write(xml_content)
+            payload_to_append = ""
+            for cs_id, cs_body in new_changesets:
+                if cs_id in existing_content:
+                    print(
+                        f"ℹ️  ChangeSet '{cs_id}' already exists in {file_name}. Skipping."
+                    )
+                    continue
+                payload_to_append += cs_body
 
-        print(f"Generated DDL: {full_path}")
-        generated_files.append(file_name)
+            if payload_to_append:
+                if "</databaseChangeLog>" in existing_content:
+                    parts = existing_content.rsplit("</databaseChangeLog>", 1)
+                    xml_content = (
+                        parts[0] + payload_to_append + "</databaseChangeLog>\n"
+                    )
+                else:
+                    xml_content = existing_content + payload_to_append
 
-    return sorted(generated_files)
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(xml_content)
+                print(f"➕ Appended new changeSets to: {full_path}")
+        else:
+            xml_content = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            xml_content += "<databaseChangeLog\n"
+            xml_content += (
+                '        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"\n'
+            )
+            xml_content += (
+                '        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"\n'
+            )
+            xml_content += (
+                '        xmlns:ext="http://www.liquibase.org/xml/ns/dbchangelog-ext"\n'
+            )
+            xml_content += '        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd\n'
+            xml_content += '        http://www.liquibase.org/xml/ns/dbchangelog-ext https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-ext.xsd">\n\n'
+
+            for _, cs_body in new_changesets:
+                xml_content += cs_body
+
+            xml_content += "</databaseChangeLog>\n"
+
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(xml_content)
+            print(f"✨ Generated fresh DDL: {full_path}")
+
+        generated_files.add(file_name)
+
+    return sorted(list(generated_files))
 
 
 def generate_version_changelog(ddl_files):
@@ -279,31 +351,22 @@ def generate_version_changelog(ddl_files):
 
 
 def generate_master_changelog():
-    # Target file format expected by Liquibase
-    target_include = f'<include file="mongodb/{VERSION}/changelog-{VERSION}.xml" relativeToChangelogFile="true"/>'
+    target_include = f'<include file="{VERSION}/changelog-{VERSION}.xml" relativeToChangelogFile="true"/>'
 
-    # Check if master exists to preserve its previous entries
     if os.path.exists(MASTER_CHANGELOG):
         with open(MASTER_CHANGELOG, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # If the target version inclusion is already present, nothing to append
-        if f"mongodb/{VERSION}/changelog-{VERSION}.xml" in content:
-            print(
-                f"ℹ️  Master changelog already contains the target version inclusion profile."
-            )
+        if f'file="{VERSION}/changelog-{VERSION}.xml"' in content:
+            print("ℹ️  Master changelog already contains target version. Skipping.")
             return
 
-        # Locate the closing tag to dynamically insert our reference right before it
         if "</databaseChangeLog>" in content:
             parts = content.rsplit("</databaseChangeLog>", 1)
-            # Standardize indentation styling automatically
             xml_content = parts[0] + f"    {target_include}\n\n</databaseChangeLog>\n"
         else:
-            # Fallback if XML structure is corrupted/malformed
             xml_content = content + f"\n{target_include}\n"
     else:
-        # Fallback initialization structure if running completely fresh
         xml_content = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         xml_content += "<databaseChangeLog\n"
         xml_content += '        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"\n'
@@ -327,8 +390,6 @@ if __name__ == "__main__":
     if ddl_list:
         generate_version_changelog(ddl_list)
         generate_master_changelog()
-        print(
-            "\n✅ Run complete! Multi-collection file groupings generated using clean string builders."
-        )
+        print("\n✅ Run complete! Multi-collection file groupings updated securely.")
     else:
         print("\n❌ Extraction returned empty. Verify your Python path configurations.")
